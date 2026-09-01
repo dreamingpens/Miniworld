@@ -139,11 +139,14 @@ def test_multi_agent_observations_and_actions(num_agents):
         num_blocks=2,
         blocks_static=True,
         num_agents=num_agents,
+        agent_mesh="agent_robot",
     )
     obs, _ = env.reset(seed=11)
     world = env.unwrapped
 
     assert len(world.agents) == num_agents
+    assert all(agent.mesh_name == "agent_robot" for agent in world.agents)
+    assert all(agent.mesh is not None for agent in world.agents)
     assert obs.shape == (num_agents, 24, 32, 3)
     assert env.action_space.shape == (num_agents,)
     assert len({tuple(agent.pos) for agent in world.agents}) == num_agents

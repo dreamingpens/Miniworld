@@ -483,10 +483,12 @@ class MiniWorldEnv(gym.Env):
         render_mode: Optional[str] = None,
         view: str = "agent",
         num_agents: int = 1,
+        agent_mesh: Optional[str] = None,
     ):
         self.num_agents = int(num_agents)
         if self.num_agents < 1 or self.num_agents > 4:
             raise ValueError("num_agents must be between 1 and 4")
+        self.agent_mesh = str(agent_mesh) if agent_mesh else None
 
         # Action enumeration for this environment
         self.actions = MiniWorldEnv.Actions
@@ -579,7 +581,10 @@ class MiniWorldEnv(gym.Env):
             (0.1, 0.8, 0.2),
             (1.0, 0.75, 0.0),
         )
-        self.agents = [Agent(color=agent_colors[i]) for i in range(self.num_agents)]
+        self.agents = [
+            Agent(color=agent_colors[i], mesh_name=self.agent_mesh)
+            for i in range(self.num_agents)
+        ]
         self.agent = self.agents[0]
 
         # List of entities contained

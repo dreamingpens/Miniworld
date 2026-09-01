@@ -3,6 +3,7 @@
 .venv/bin/python -m scripts.generate_videos \
     --env-name MiniWorld-MovingBlockWorld-v0 \
     --num-agents 4 \
+    --agent-mesh agent_robot \
     --seed 123 \
     --turn-step-deg 90 \
     --forward-step 1.0 \

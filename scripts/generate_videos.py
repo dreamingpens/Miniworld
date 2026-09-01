@@ -158,6 +158,8 @@ def build_env(args) -> gym.Env:
         "window_width": int(args.render_width),
         "window_height": int(args.render_height),
     }
+    if getattr(args, "agent_mesh", None):
+        env_kwargs["agent_mesh"] = str(args.agent_mesh)
 
     # Room size if provided
     if args.room_size is not None:
@@ -2150,6 +2152,7 @@ def main():
     # Agent spawn option: place agent at the center (uses env support)
     parser.add_argument("--agent-center-start", action="store_true", help="spawn the agent at the room center (top-left of middle for even sizes)")
     parser.add_argument("--num-agents", type=int, choices=range(1, 5), default=1, metavar="{1,2,3,4}", help="number of independently controlled agents; 3 or 4 produces a multi-camera grid")
+    parser.add_argument("--agent-mesh", type=str, default=None, help="optional mesh name used to render agent bodies (for example: agent_robot)")
     # EdgePlus/Peekaboo observation duration
     parser.add_argument("--observe-steps", type=int, default=5, help="edge_plus: number of NOOP steps to observe at each edge center; also used as default inward observe for peekaboo_motion")
     parser.add_argument("--observe-inward-steps", type=int, default=None, help="peekaboo_motion: number of NOOP steps to observe inward at edge (defaults to --observe-steps)")

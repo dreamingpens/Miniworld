@@ -529,11 +529,12 @@ class Ball(MeshEnt):
 
 
 class Agent(Entity):
-    def __init__(self, color=(1.0, 0.0, 0.0)):
+    def __init__(self, color=(1.0, 0.0, 0.0), mesh_name=None):
         super().__init__()
 
         # Color used to distinguish agents in third-person/top-down views
         self.color = tuple(float(c) for c in color)
+        self.mesh_name = str(mesh_name) if mesh_name else None
 
         # Distance between the camera and the floor
         self.cam_height = 1.5
@@ -548,6 +549,15 @@ class Agent(Entity):
         # Bounding cylinder size for the agent
         self.radius = 0.4
         self.height = 1.6
+
+        # Optional first/third-person body mesh. The legacy direction triangle
+        # is still drawn above it so agents remain distinct in top views.
+        self.mesh = ObjMesh.get(self.mesh_name) if self.mesh_name else None
+        self.mesh_scale = (
+            self.height / float(self.mesh.max_coords[1])
+            if self.mesh is not None
+            else 1.0
+        )
 
         # Object currently being carried by the agent
         self.carrying = None
@@ -599,10 +609,37 @@ class Agent(Entity):
         Draw the agent
         """
 
-        # Note: this is currently only used in the top view
-        # Eventually, we will want a proper 3D model
+        if self.mesh is not None:
+            glPushMatrix()
+            glTranslatef(*self.pos)
+            glRotatef(self.dir * 180 / math.pi, 0, 1, 0)
+            glScalef(self.mesh_scale, self.mesh_scale, self.mesh_scale)
+            glColor3f(1, 1, 1)
+            self.mesh.render()
 
-        p = self.pos + Y_VEC * self.height
+            # A thin per-agent color band keeps identities readable from all
+            # horizontal camera angles without requiring one OBJ per color.
+            band_radius = 0.323
+            band_bottom = 0.70
+            band_top = 0.88
+            glColor3f(*self.color)
+            glBegin(GL_QUADS)
+            for idx in range(8):
+                a0 = -idx * 2 * math.pi / 8
+                a1 = -(idx + 1) * 2 * math.pi / 8
+                x0, z0 = band_radius * math.cos(a0), band_radius * math.sin(a0)
+                x1, z1 = band_radius * math.cos(a1), band_radius * math.sin(a1)
+                mid = 0.5 * (a0 + a1)
+                glNormal3f(math.cos(mid), 0, math.sin(mid))
+                glVertex3f(x0, band_bottom, z0)
+                glVertex3f(x1, band_bottom, z1)
+                glVertex3f(x1, band_top, z1)
+                glVertex3f(x0, band_top, z0)
+            glEnd()
+            glPopMatrix()
+
+        marker_height = self.height + (0.025 if self.mesh is not None else 0.0)
+        p = self.pos + Y_VEC * marker_height
         dv = self.dir_vec * self.radius
         rv = self.right_vec * self.radius
 
