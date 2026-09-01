@@ -15,8 +15,8 @@
     --no-time-limit \
     --render-width 512 \
     --render-height 512 \
-    --obs-width 512 \
-    --obs-height 512 \
+    --obs-width 64 \
+    --obs-height 64 \
     --steps 300 \
     --room-size 16 \
     --block-size-xy 0.7 \

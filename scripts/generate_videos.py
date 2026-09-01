@@ -1719,7 +1719,9 @@ def run_rollout(
     agent_pos_list.append(env.unwrapped.agent.pos.copy())
     agent_dir_list.append(_wrap_angle_0_2pi(env.unwrapped.agent.dir))
     if is_multi_agent:
-        agent_camera_list.append(world.render_agent_views(world.vis_fb))
+        # Per-agent streams use the observation buffer resolution. The visual
+        # buffer remains available at its independent size for maps and CCTV.
+        agent_camera_list.append(world.render_agent_views(world.obs_fb))
         all_agent_pos_list.append(np.stack([a.pos.copy() for a in world.agents]))
         all_agent_dir_list.append(
             np.array([_wrap_angle_0_2pi(a.dir) for a in world.agents], dtype=np.float32)
@@ -1796,7 +1798,7 @@ def run_rollout(
         agent_pos_list.append(env.unwrapped.agent.pos.copy())
         agent_dir_list.append(_wrap_angle_0_2pi(env.unwrapped.agent.dir))
         if is_multi_agent:
-            agent_camera_list.append(world.render_agent_views(world.vis_fb))
+            agent_camera_list.append(world.render_agent_views(world.obs_fb))
             all_agent_pos_list.append(np.stack([a.pos.copy() for a in world.agents]))
             all_agent_dir_list.append(
                 np.array([_wrap_angle_0_2pi(a.dir) for a in world.agents], dtype=np.float32)
