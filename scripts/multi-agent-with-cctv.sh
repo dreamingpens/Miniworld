@@ -1,0 +1,36 @@
+  python -m scripts.generate_videos \
+    --env-name MiniWorld-MovingBlockWorld-v0 \
+    --num-agents 4 \
+    --seed 123 \
+    --turn-step-deg 90 \
+    --forward-step 1.0 \
+    --heading-zero \
+    --grid-mode \
+    --grid-vel-min -1 \
+    --grid-vel-max 1 \
+    --grid-cardinal-only \
+    --no-time-limit \
+    --render-width 256 \
+    --render-height 256 \
+    --obs-width 256 \
+    --obs-height 256 \
+    --steps 300 \
+    --room-size 16 \
+    --block-size-xy 0.7 \
+    --block-height 1.5 \
+    --agent-box-allow-overlap \
+    --box-allow-overlap \
+    --policy biased_walk_v2 \
+    --forward-prob 0.90 \
+    --cam-fov-y 60 \
+    --num-blocks-min 6 \
+    --num-blocks-max 10 \
+    --ensure-base-palette \
+    --randomize-wall-tex \
+    --randomize-floor-tex \
+    --randomize-box-tex \
+    --box-and-ball \
+    --num-static-objects 12 \
+    --static-object-spacing 3.0 \
+    --out-prefix ./out/multi \
+    --four-corner-cameras
