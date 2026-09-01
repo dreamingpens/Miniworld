@@ -1,4 +1,6 @@
-  python -m scripts.generate_videos \
+#!/bin/sh
+
+.venv/bin/python -m scripts.generate_videos \
     --env-name MiniWorld-MovingBlockWorld-v0 \
     --num-agents 4 \
     --seed 123 \
@@ -10,10 +12,10 @@
     --grid-vel-max 1 \
     --grid-cardinal-only \
     --no-time-limit \
-    --render-width 256 \
-    --render-height 256 \
-    --obs-width 256 \
-    --obs-height 256 \
+    --render-width 512 \
+    --render-height 512 \
+    --obs-width 512 \
+    --obs-height 512 \
     --steps 300 \
     --room-size 16 \
     --block-size-xy 0.7 \
@@ -32,5 +34,6 @@
     --box-and-ball \
     --num-static-objects 12 \
     --static-object-spacing 3.0 \
-    --out-prefix ./out/multi \
+    --out-prefix ./out/multi_512 \
+    --output-2d-map \
     --four-corner-cameras
