@@ -20,6 +20,8 @@ Outputs (written using <out-prefix>):
 Optional debug/map outputs:
   - --debug-join                  Saves <out-prefix>_debug.mp4 (RGB | top-view side-by-side)
   - --output-2d-map               Saves <out-prefix>_map_2d.mp4 and stores top_view_scale in actions.pt
+  - --four-corner-cameras         Saves four fixed-camera MP4s and a 2x2 montage
+  - --num-agents 3|4              Runs multiple agents and saves every first-person view
 
 Key flag groups:
   Rendering:
@@ -74,7 +76,9 @@ python -m scripts.generate_videos \
   --policy biased_walk_v2 --forward-prob 0.90 --cam-fov-y 60 \
   --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette \
   --out-prefix ./out/tex --debug-join \
-  --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball
+  --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball \
+  --num-static-objects 12 --static-object-spacing 3.0 \
+  --four-corner-cameras --corner-camera-height 8
   
 """
 
@@ -82,6 +86,7 @@ python -m scripts.generate_videos \
 import argparse
 import math
 import os
+import sys
 from typing import Tuple, Optional
 
 import gymnasium as gym
@@ -103,8 +108,16 @@ def _should_enable_headless() -> bool:
     # Respect existing pyglet hint if already set by caller
     if _is_truthy(os.environ.get("PYGLET_HEADLESS", "")):
         return True
-    # Fall back to auto-detect: no X/Wayland display implies headless
-    if (os.name != "nt") and (not os.environ.get("DISPLAY")) and (not os.environ.get("WAYLAND_DISPLAY")):
+    # Fall back to auto-detect on Linux and other Unix systems that use
+    # X11/Wayland.  macOS normally has neither variable even in a graphical
+    # session, and forcing pyglet's EGL backend there fails because macOS does
+    # not provide libEGL.
+    if (
+        os.name != "nt"
+        and sys.platform != "darwin"
+        and not os.environ.get("DISPLAY")
+        and not os.environ.get("WAYLAND_DISPLAY")
+    ):
         return True
     return False
 
@@ -129,6 +142,7 @@ if _HEADLESS_MODE:
 import miniworld
 from miniworld.params import DEFAULT_PARAMS
 from miniworld.entity import Box
+from miniworld.miniworld import MiniWorldEnv
 
 
 def build_env(args) -> gym.Env:
@@ -136,6 +150,7 @@ def build_env(args) -> gym.Env:
     env_kwargs = {
         "view": view_mode,
         "render_mode": "rgb_array",
+        "num_agents": int(getattr(args, "num_agents", 1)),
         # Observation buffer size (used by render_obs and default depth)
         "obs_width": int(args.obs_width),
         "obs_height": int(args.obs_height),
@@ -209,6 +224,14 @@ def build_env(args) -> gym.Env:
     # Agent spawn control: center start
     if getattr(args, "agent_center_start", False):
         env_kwargs["agent_center_start"] = True
+    if getattr(args, "num_static_objects", 0) > 0:
+        env_kwargs["num_static_objects"] = int(args.num_static_objects)
+        env_kwargs["static_object_meshes"] = [
+            name.strip()
+            for name in str(args.static_object_meshes).split(",")
+            if name.strip()
+        ]
+        env_kwargs["static_object_spacing"] = float(args.static_object_spacing)
 
     # Build params so first reset uses them
     params = None
@@ -1527,6 +1550,60 @@ def _to_agent_frame(delta_xz: np.ndarray, agent_dir: np.ndarray) -> np.ndarray:
     return np.concatenate([rel_x, rel_z], axis=-1)
 
 
+CORNER_CAMERA_NAMES = (
+    "xmin_zmin",
+    "xmax_zmin",
+    "xmin_zmax",
+    "xmax_zmax",
+)
+
+
+def _render_corner_cameras(
+    env: gym.Env,
+    camera_height: float,
+    camera_inset: float,
+    camera_fov_y: float,
+) -> np.ndarray:
+    """Render four elevated corner cameras, all aimed at the room center."""
+
+    world = env.unwrapped
+    inset = max(0.0, float(camera_inset))
+    x0 = float(world.min_x) + inset
+    x1 = float(world.max_x) - inset
+    z0 = float(world.min_z) + inset
+    z1 = float(world.max_z) - inset
+    if x0 >= x1 or z0 >= z1:
+        raise ValueError("corner camera inset is too large for this map")
+
+    target = np.array(
+        [
+            (float(world.min_x) + float(world.max_x)) * 0.5,
+            0.75,
+            (float(world.min_z) + float(world.max_z)) * 0.5,
+        ],
+        dtype=float,
+    )
+    eyes = (
+        np.array([x0, camera_height, z0], dtype=float),
+        np.array([x1, camera_height, z0], dtype=float),
+        np.array([x0, camera_height, z1], dtype=float),
+        np.array([x1, camera_height, z1], dtype=float),
+    )
+    return np.stack(
+        [
+            world.render_camera(
+                eye,
+                target,
+                frame_buffer=world.vis_fb,
+                fov_y=camera_fov_y,
+                render_agent=True,
+            )
+            for eye in eyes
+        ],
+        axis=0,
+    )
+
+
 def run_rollout(
     env: gym.Env,
     steps: int,
@@ -1534,9 +1611,14 @@ def run_rollout(
     segment_len: int,
     policy_name: str,
     policy_kwargs: dict,
+    seed: Optional[int] = None,
     observe_steps: int = 5,
     capture_top: bool = False,
     store_block_info: bool = False,
+    capture_corner_cameras: bool = False,
+    corner_camera_height: float = 8.0,
+    corner_camera_inset: float = 1.0,
+    corner_camera_fov_y: float = 60.0,
 ) -> Tuple[
     np.ndarray,  # rgb
     np.ndarray,  # depth
@@ -1548,6 +1630,9 @@ def run_rollout(
     np.ndarray,  # agent_dir (T,)
     Optional[dict],  # top_view_scale (or None)
     Optional[dict],  # block_info (or None)
+    Optional[np.ndarray],  # corner camera frames (T,4,H,W,3), or None
+    Optional[np.ndarray],  # agent camera frames (T,N,H,W,3), or None
+    Optional[dict],  # multi-agent trajectories, or None
 ]:
     obs_list = []
     depth_list = []
@@ -1558,44 +1643,70 @@ def run_rollout(
     agent_dir_list = []
     # Block info capture (full trajectory length T+1, trimmed to T on return)
     block_pos_list = []
+    corner_camera_list = [] if capture_corner_cameras else None
+    world = env.unwrapped
+    is_multi_agent = len(world.agents) > 1
+    agent_camera_list = [] if is_multi_agent else None
+    all_agent_pos_list = [] if is_multi_agent else None
+    all_agent_dir_list = [] if is_multi_agent else None
 
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed)
     if align_heading_zero:
-        env.unwrapped.agent.dir = 0.0
-    # Always keep heading in [0, 2π)
-    env.unwrapped.agent.dir = _wrap_angle_0_2pi(env.unwrapped.agent.dir)
+        for agent in world.agents:
+            agent.dir = 0.0
+    for agent in world.agents:
+        agent.dir = _wrap_angle_0_2pi(agent.dir)
 
-    # Instantiate policy BEFORE first render so it can adjust spawn pose
-    if policy_name == "back_and_forth":
-        policy = BackAndForthPolicy(segment_len=segment_len)
-    elif policy_name == "center_rotate":
-        policy = CenterRotatePolicy(env=env)
-    elif policy_name == "do_nothing":
-        policy = DoNothingPolicy(env=env)
-    elif policy_name == "edge_plus":
-        policy = EdgePlusPolicy(env=env, observe_steps=observe_steps)
-    elif policy_name == "biased_walk_v2":
-        policy = BiasedWalkV2Policy(
+    def make_policy():
+        if policy_name == "back_and_forth":
+            return BackAndForthPolicy(segment_len=segment_len)
+        if policy_name == "center_rotate":
+            return CenterRotatePolicy(env=env)
+        if policy_name == "do_nothing":
+            return DoNothingPolicy(env=env)
+        if policy_name == "edge_plus":
+            return EdgePlusPolicy(env=env, observe_steps=observe_steps)
+        if policy_name == "biased_walk_v2":
+            return BiasedWalkV2Policy(
+                env=env,
+                forward_prob=policy_kwargs.get("forward_prob", 0.8),
+                observe_steps=observe_steps,
+                debug=policy_kwargs.get("debug", False),
+            )
+        if policy_name == "peekaboo_motion":
+            return PeekabooMotionPolicy(
+                env=env,
+                observe_inward_steps=policy_kwargs.get("observe_inward_steps", observe_steps),
+                observe_outward_steps=policy_kwargs.get("observe_outward_steps", max(1, observe_steps * 4)),
+            )
+        if policy_name == "peeakboo":
+            return PeeakbooPolicy(env=env, observe_steps=observe_steps)
+        if policy_name == "blockmover":
+            return BlockMoverPolicy(env=env)
+        return BiasedRandomPolicy(
             env=env,
             forward_prob=policy_kwargs.get("forward_prob", 0.8),
-            observe_steps=observe_steps,
-            debug=policy_kwargs.get("debug", False),
+            turn_left_weight=policy_kwargs.get("turn_left_weight", 1.0),
+            turn_right_weight=policy_kwargs.get("turn_right_weight", 1.0),
+            wall_buffer=policy_kwargs.get("wall_buffer", 1.5),
+            avoid_turning_into_walls=policy_kwargs.get(
+                "avoid_turning_into_walls", True
+            ),
+            lookahead_mult=policy_kwargs.get("lookahead_mult", 2.0),
         )
-    elif policy_name == "peekaboo_motion":
-        policy = PeekabooMotionPolicy(
-            env=env,
-            observe_inward_steps=policy_kwargs.get("observe_inward_steps", observe_steps),
-            observe_outward_steps=policy_kwargs.get("observe_outward_steps", max(1, observe_steps * 4)),
-        )
-    elif policy_name == "peeakboo":
-        policy = PeeakbooPolicy(env=env, observe_steps=observe_steps)
-    elif policy_name == "blockmover":
-        policy = BlockMoverPolicy(env=env)
-    else:
-        policy = BiasedRandomPolicy(env=env, **policy_kwargs)
+
+    # Policies access env.agent for backward compatibility. Bind each policy to
+    # its own agent while constructing it and whenever it chooses an action.
+    policies = []
+    primary_agent = world.agent
+    for agent in world.agents:
+        world.agent = agent
+        policies.append(make_policy())
+    world.agent = primary_agent
 
     # Policy may have adjusted spawn pose; ensure heading in [0, 2π) before first capture
-    env.unwrapped.agent.dir = _wrap_angle_0_2pi(env.unwrapped.agent.dir)
+    for agent in world.agents:
+        agent.dir = _wrap_angle_0_2pi(agent.dir)
     rgb = env.render()  # render current obs after any policy-driven pose adjust
 
     # Collect first frame
@@ -1605,6 +1716,12 @@ def run_rollout(
     # Initial agent state
     agent_pos_list.append(env.unwrapped.agent.pos.copy())
     agent_dir_list.append(_wrap_angle_0_2pi(env.unwrapped.agent.dir))
+    if is_multi_agent:
+        agent_camera_list.append(world.render_agent_views(world.vis_fb))
+        all_agent_pos_list.append(np.stack([a.pos.copy() for a in world.agents]))
+        all_agent_dir_list.append(
+            np.array([_wrap_angle_0_2pi(a.dir) for a in world.agents], dtype=np.float32)
+        )
 
     # Blocks: define a stable ordering within the episode
     block_info_static = None
@@ -1636,12 +1753,26 @@ def run_rollout(
             "x_offset": float(scale["x_offset"]),
             "z_offset": float(scale["z_offset"]),
         }
-    act_fn = policy.action
+    if capture_corner_cameras:
+        corner_camera_list.append(
+            _render_corner_cameras(
+                env,
+                corner_camera_height,
+                corner_camera_inset,
+                corner_camera_fov_y,
+            )
+        )
     for t in range(steps):
-        a = act_fn(t)
+        chosen_actions = []
+        for agent, policy in zip(world.agents, policies):
+            world.agent = agent
+            chosen_actions.append(policy.action(t))
+        world.agent = primary_agent
+        a = chosen_actions[0] if not is_multi_agent else np.asarray(chosen_actions, dtype=np.int64)
         obs, reward, term, trunc, info = env.step(a)
         # MiniWorld accumulates heading; normalize to [0, 2π) for consistency
-        env.unwrapped.agent.dir = _wrap_angle_0_2pi(env.unwrapped.agent.dir)
+        for agent in world.agents:
+            agent.dir = _wrap_angle_0_2pi(agent.dir)
         rgb = env.render()
         obs_list.append(rgb)
         depth = env.unwrapped.render_depth(env.unwrapped.vis_fb)
@@ -1649,10 +1780,25 @@ def run_rollout(
         if capture_top:
             top = env.unwrapped.render_top_view(env.unwrapped.vis_fb, render_agent=True)
             top_list.append(top)
+        if capture_corner_cameras:
+            corner_camera_list.append(
+                _render_corner_cameras(
+                    env,
+                    corner_camera_height,
+                    corner_camera_inset,
+                    corner_camera_fov_y,
+                )
+            )
         actions.append(a)
         # Record agent state after step
         agent_pos_list.append(env.unwrapped.agent.pos.copy())
         agent_dir_list.append(_wrap_angle_0_2pi(env.unwrapped.agent.dir))
+        if is_multi_agent:
+            agent_camera_list.append(world.render_agent_views(world.vis_fb))
+            all_agent_pos_list.append(np.stack([a.pos.copy() for a in world.agents]))
+            all_agent_dir_list.append(
+                np.array([_wrap_angle_0_2pi(a.dir) for a in world.agents], dtype=np.float32)
+            )
         if store_block_info:
             if blocks is None:
                 blocks = [e for e in env.unwrapped.entities if isinstance(e, Box)]
@@ -1671,6 +1817,16 @@ def run_rollout(
     actions_arr = np.array(actions, dtype=np.int64)  # (T,)
     top_arr = (
         np.stack(top_list[:steps_executed], axis=0) if (capture_top and top_list) else None
+    )
+    corner_camera_arr = (
+        np.stack(corner_camera_list[:steps_executed], axis=0)
+        if (capture_corner_cameras and corner_camera_list)
+        else None
+    )
+    agent_camera_arr = (
+        np.stack(agent_camera_list[:steps_executed], axis=0)
+        if (is_multi_agent and agent_camera_list)
+        else None
     )
 
     # Agent trajectories
@@ -1723,7 +1879,24 @@ def run_rollout(
             "agent_dir": torch.from_numpy(agent_dir.astype(np.float32)),               # (T,)
         }
 
-    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info
+    multi_agent_info = None
+    if is_multi_agent:
+        all_pos_full = np.stack(all_agent_pos_list, axis=0).astype(np.float32)
+        all_dir_full = np.stack(all_agent_dir_list, axis=0).astype(np.float32)
+        multi_agent_info = {
+            "agent_pos": all_pos_full[:steps_executed],
+            "agent_dir": all_dir_full[:steps_executed],
+            "delta_xz": (
+                all_pos_full[1 : steps_executed + 1, :, (0, 2)]
+                - all_pos_full[:steps_executed, :, (0, 2)]
+            ).astype(np.float32),
+            "delta_dir": _wrap_angle(
+                all_dir_full[1 : steps_executed + 1]
+                - all_dir_full[:steps_executed]
+            ).astype(np.float32),
+        }
+
+    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info, corner_camera_arr, agent_camera_arr, multi_agent_info
 
 
 def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
@@ -1742,6 +1915,32 @@ def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
     ) as writer:
         for frame in frames:
             writer.append_data(frame)
+
+
+def write_corner_camera_videos(out_prefix: str, frames: np.ndarray):
+    """Save four camera streams and a 2x2 synchronized montage."""
+
+    for camera_idx, camera_name in enumerate(CORNER_CAMERA_NAMES):
+        write_mp4_rgb(
+            f"{out_prefix}_corner_{camera_name}.mp4",
+            frames[:, camera_idx],
+        )
+
+    top_row = np.concatenate([frames[:, 0], frames[:, 1]], axis=2)
+    bottom_row = np.concatenate([frames[:, 2], frames[:, 3]], axis=2)
+    montage = np.concatenate([top_row, bottom_row], axis=1)
+    write_mp4_rgb(f"{out_prefix}_corners_2x2.mp4", montage)
+
+
+def write_agent_camera_videos(out_prefix: str, frames: np.ndarray):
+    """Save each first-person stream and their synchronized grid."""
+
+    for agent_idx in range(frames.shape[1]):
+        write_mp4_rgb(f"{out_prefix}_agent_{agent_idx}_rgb.mp4", frames[:, agent_idx])
+    montage = np.stack(
+        [MiniWorldEnv.tile_agent_views(step_views) for step_views in frames], axis=0
+    )
+    write_mp4_rgb(f"{out_prefix}_agents_grid.mp4", montage)
 
 
 def _generate_one(idx: int, ns: SimpleNamespace):
@@ -1788,16 +1987,21 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         observe_outward_steps=(args.observe_outward_steps if args.observe_outward_steps is not None else (4 * args.observe_steps)),
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info, corner_cameras, agent_cameras, multi_agent_info = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
         segment_len=args.segment_len,
         policy_name=args.policy,
         policy_kwargs=policy_kwargs,
+        seed=item_seed,
         observe_steps=args.observe_steps,
         capture_top=(args.debug_join or args.output_2d_map),
         store_block_info=getattr(args, "store_block_info", False),
+        capture_corner_cameras=getattr(args, "four_corner_cameras", False),
+        corner_camera_height=args.corner_camera_height,
+        corner_camera_inset=args.corner_camera_inset,
+        corner_camera_fov_y=args.corner_camera_fov_y,
     )
 
     write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
@@ -1810,6 +2014,15 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
         "agent_dir": torch.tensor(agent_dir, dtype=torch.float32),
     }
+    if multi_agent_info is not None:
+        meta.update(
+            {
+                "multi_agent_pos": torch.from_numpy(multi_agent_info["agent_pos"]),
+                "multi_agent_dir": torch.from_numpy(multi_agent_info["agent_dir"]),
+                "multi_agent_delta_xz": torch.from_numpy(multi_agent_info["delta_xz"]),
+                "multi_agent_delta_dir": torch.from_numpy(multi_agent_info["delta_dir"]),
+            }
+        )
     if args.output_2d_map and top_view_scale is not None:
         meta["top_view_scale"] = {k: float(v) for k, v in top_view_scale.items()}
     torch.save(meta, f"{out_prefix}_actions.pt")
@@ -1828,6 +2041,10 @@ def _generate_one(idx: int, ns: SimpleNamespace):
 
     if getattr(args, "store_block_info", False) and block_info is not None:
         torch.save(block_info, f"{out_prefix}_block_info.pt")
+    if corner_cameras is not None:
+        write_corner_camera_videos(out_prefix, corner_cameras)
+    if agent_cameras is not None:
+        write_agent_camera_videos(out_prefix, agent_cameras)
 
     env.close()
     return idx
@@ -1901,6 +2118,13 @@ def main():
     # Block size controls (MovingBlockWorld): uniform footprint and/or height
     parser.add_argument("--block-size-xy", type=float, default=None, help="if set, use this x/z size (meters) for all blocks")
     parser.add_argument("--block-height", type=float, default=None, help="if set, use this height (meters) for all blocks")
+    parser.add_argument("--num-static-objects", type=int, default=0, help="place this many well-spaced static mesh objects; the first is centered")
+    parser.add_argument("--static-object-meshes", type=str, default="office_desk,office_chair,barrel,cone,tree_pine", help="comma-separated mesh names used for static scenery")
+    parser.add_argument("--static-object-spacing", type=float, default=3.0, help="grid spacing between static scenery objects in meters")
+    parser.add_argument("--four-corner-cameras", action="store_true", help="save four elevated fixed-camera videos plus a 2x2 montage")
+    parser.add_argument("--corner-camera-height", type=float, default=8.0, help="fixed corner camera height in meters")
+    parser.add_argument("--corner-camera-inset", type=float, default=1.0, help="camera inset from each room corner in meters")
+    parser.add_argument("--corner-camera-fov-y", type=float, default=60.0, help="vertical field of view for fixed corner cameras")
 
     # Parallel dataset generation (DEPRECATED): use scripts.generate_videos_batch
     parser.add_argument("--dataset-root", type=str, default=None, help="DEPRECATED: use scripts.generate_videos_batch for multi-generation")
@@ -1925,12 +2149,23 @@ def main():
     parser.add_argument("--lookahead-mult", type=float, default=2.0, help="biased_random: lookahead distance multiplier relative to max forward step")
     # Agent spawn option: place agent at the center (uses env support)
     parser.add_argument("--agent-center-start", action="store_true", help="spawn the agent at the room center (top-left of middle for even sizes)")
+    parser.add_argument("--num-agents", type=int, choices=range(1, 5), default=1, metavar="{1,2,3,4}", help="number of independently controlled agents; 3 or 4 produces a multi-camera grid")
     # EdgePlus/Peekaboo observation duration
     parser.add_argument("--observe-steps", type=int, default=5, help="edge_plus: number of NOOP steps to observe at each edge center; also used as default inward observe for peekaboo_motion")
     parser.add_argument("--observe-inward-steps", type=int, default=None, help="peekaboo_motion: number of NOOP steps to observe inward at edge (defaults to --observe-steps)")
     parser.add_argument("--observe-outward-steps", type=int, default=None, help="peekaboo_motion: number of NOOP steps to observe outward at edge (defaults to 4x inward)")
 
     args = parser.parse_args()
+
+    # For multi-agent rollouts, treat --out-prefix as an output directory. This
+    # keeps all synchronized camera streams and metadata together instead of
+    # scattering files such as out/multi_agent_0_rgb.mp4 across out/.
+    if args.num_agents > 1:
+        output_dir = Path(args.out_prefix or "./out/multi")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        args.out_prefix = str(output_dir / "multi")
+    elif not args.out_prefix:
+        parser.error("--out-prefix is required for single-agent generation")
 
     # If dataset_root is provided, run parallel generation
     if args.dataset_root:
@@ -1952,16 +2187,21 @@ def main():
         observe_outward_steps=(args.observe_outward_steps if getattr(args, "observe_outward_steps", None) is not None else (4 * args.observe_steps)),
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info, corner_cameras, agent_cameras, multi_agent_info = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
         segment_len=args.segment_len,
         policy_name=args.policy,
         policy_kwargs=policy_kwargs,
+        seed=args.seed,
         observe_steps=args.observe_steps,
         capture_top=(args.debug_join or args.output_2d_map),
         store_block_info=getattr(args, "store_block_info", False),
+        capture_corner_cameras=args.four_corner_cameras,
+        corner_camera_height=args.corner_camera_height,
+        corner_camera_inset=args.corner_camera_inset,
+        corner_camera_fov_y=args.corner_camera_fov_y,
     )
 
     # Save outputs
@@ -1975,6 +2215,15 @@ def main():
         "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
         "agent_dir": torch.tensor(agent_dir, dtype=torch.float32),
     }
+    if multi_agent_info is not None:
+        meta.update(
+            {
+                "multi_agent_pos": torch.from_numpy(multi_agent_info["agent_pos"]),
+                "multi_agent_dir": torch.from_numpy(multi_agent_info["agent_dir"]),
+                "multi_agent_delta_xz": torch.from_numpy(multi_agent_info["delta_xz"]),
+                "multi_agent_delta_dir": torch.from_numpy(multi_agent_info["delta_dir"]),
+            }
+        )
     if args.output_2d_map and top_view_scale is not None:
         # Save mapping to convert world (x,z) -> pixel (u,v)
         meta["top_view_scale"] = {
@@ -2003,11 +2252,15 @@ def main():
 
     if getattr(args, "store_block_info", False) and block_info is not None:
         torch.save(block_info, f"{args.out_prefix}_block_info.pt")
+    if corner_cameras is not None:
+        write_corner_camera_videos(args.out_prefix, corner_cameras)
+    if agent_cameras is not None:
+        write_agent_camera_videos(args.out_prefix, agent_cameras)
+
+    print(f"Saved rollout files under: {Path(args.out_prefix).parent.resolve()}")
 
     env.close()
 
 
 if __name__ == "__main__":
     main()
-
-

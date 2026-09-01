@@ -83,10 +83,22 @@ def main():
         action="store_true",
         help="align agent heading to 0 radians after each reset",
     )
+    parser.add_argument(
+        "--num-agents",
+        type=int,
+        choices=range(1, 5),
+        default=1,
+        metavar="{1,2,3,4}",
+        help="number of agents/camera views; press 1-4 to select one",
+    )
     args = parser.parse_args()
     view_mode = "top" if args.top_view else "agent"
 
-    env_kwargs = {"view": view_mode, "render_mode": "human"}
+    env_kwargs = {
+        "view": view_mode,
+        "render_mode": "human",
+        "num_agents": args.num_agents,
+    }
     if args.box_speed_scale is not None:
         env_kwargs["box_speed_scale"] = args.box_speed_scale
     if args.box_allow_overlap:

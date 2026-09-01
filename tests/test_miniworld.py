@@ -3,6 +3,7 @@ import pickle
 import warnings
 
 import gymnasium as gym
+import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env, data_equivalence
 
@@ -91,6 +92,73 @@ def test_collision_detection():
             x, _, z = env.agent.pos
             assert room.min_x <= x <= room.max_x
             assert room.min_z <= z <= room.max_z
+
+    env.close()
+
+
+def test_static_scenery_and_fixed_camera():
+    env = gym.make(
+        "MiniWorld-MovingBlockWorld-v0",
+        render_mode="rgb_array",
+        obs_width=32,
+        obs_height=32,
+        window_width=32,
+        window_height=32,
+        size=16,
+        num_blocks=8,
+        num_static_objects=12,
+        static_object_spacing=3.0,
+    )
+    env.reset(seed=7)
+    world = env.unwrapped
+
+    assert len(world.static_scenery) == 12
+    assert world.static_scenery[0].pos.tolist() == [8.0, 0.0, 8.0]
+
+    frame = world.render_camera(
+        eye_pos=[1.0, 8.0, 1.0],
+        target_pos=[8.0, 0.75, 8.0],
+        fov_y=60.0,
+    )
+    assert frame.shape == (32, 32, 3)
+    assert 0 < frame.mean() < 255
+
+    env.close()
+
+
+@pytest.mark.parametrize("num_agents", [3, 4])
+def test_multi_agent_observations_and_actions(num_agents):
+    env = gym.make(
+        "MiniWorld-MovingBlockWorld-v0",
+        render_mode="rgb_array",
+        obs_width=32,
+        obs_height=24,
+        window_width=32,
+        window_height=24,
+        size=16,
+        num_blocks=2,
+        blocks_static=True,
+        num_agents=num_agents,
+    )
+    obs, _ = env.reset(seed=11)
+    world = env.unwrapped
+
+    assert len(world.agents) == num_agents
+    assert obs.shape == (num_agents, 24, 32, 3)
+    assert env.action_space.shape == (num_agents,)
+    assert len({tuple(agent.pos) for agent in world.agents}) == num_agents
+
+    actions = np.full(num_agents, world.actions.do_nothing, dtype=np.int64)
+    actions[0] = world.actions.turn_left
+    actions[1] = world.actions.turn_right
+    next_obs, _, _, _, _ = env.step(actions)
+    assert next_obs.shape == obs.shape
+
+    views = world.render_agent_views(world.vis_fb)
+    assert views.shape == (num_agents, 24, 32, 3)
+    montage = world.tile_agent_views(views)
+    assert montage.shape == (48, 64, 3)
+    assert 0 < montage.mean() < 255
 
     env.close()
 

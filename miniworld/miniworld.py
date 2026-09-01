@@ -1,3 +1,4 @@
+import copy
 import math
 from ctypes import POINTER
 from enum import IntEnum
@@ -481,16 +482,30 @@ class MiniWorldEnv(gym.Env):
         domain_rand: bool = False,
         render_mode: Optional[str] = None,
         view: str = "agent",
+        num_agents: int = 1,
     ):
+        self.num_agents = int(num_agents)
+        if self.num_agents < 1 or self.num_agents > 4:
+            raise ValueError("num_agents must be between 1 and 4")
+
         # Action enumeration for this environment
         self.actions = MiniWorldEnv.Actions
 
-        # Actions are discrete integer values
-        self.action_space = spaces.Discrete(len(self.actions))
+        # Preserve the original single-agent API. Multi-agent environments take
+        # one discrete action per agent.
+        if self.num_agents == 1:
+            self.action_space = spaces.Discrete(len(self.actions))
+        else:
+            self.action_space = spaces.MultiDiscrete(
+                np.full(self.num_agents, len(self.actions), dtype=np.int64)
+            )
 
         # Observations are RGB images with pixels in [0, 255]
+        obs_shape = (obs_height, obs_width, 3)
+        if self.num_agents > 1:
+            obs_shape = (self.num_agents, *obs_shape)
         self.observation_space = spaces.Box(
-            low=0, high=255, shape=(obs_height, obs_width, 3), dtype=np.uint8
+            low=0, high=255, shape=obs_shape, dtype=np.uint8
         )
 
         self.reward_range = (-math.inf, math.inf)
@@ -556,8 +571,16 @@ class MiniWorldEnv(gym.Env):
         # Step count since episode start
         self.step_count = 0
 
-        # Create the agent
-        self.agent = Agent()
+        # Create the agents. self.agent remains an alias for the primary agent
+        # so existing environments and policies stay backward compatible.
+        agent_colors = (
+            (1.0, 0.0, 0.0),
+            (0.0, 0.45, 1.0),
+            (0.1, 0.8, 0.2),
+            (1.0, 0.75, 0.0),
+        )
+        self.agents = [Agent(color=agent_colors[i]) for i in range(self.num_agents)]
+        self.agent = self.agents[0]
 
         # List of entities contained
         self.entities = []
@@ -572,6 +595,19 @@ class MiniWorldEnv(gym.Env):
         # Generate the world
         self._gen_world()
 
+        # Derived environments place the primary agent while building the
+        # world. Spawn extra agents from a temporary copy of the RNG state so
+        # adding cameras does not change wall, object, lighting, or dynamics
+        # randomization for an otherwise identical seeded rollout.
+        if self.num_agents > 1:
+            world_rng_state = copy.deepcopy(self.np_random.bit_generator.state)
+            for agent in self.agents[1:]:
+                self.place_agent(agent=agent)
+                agent.randomize(
+                    self.params, self.np_random if self.domain_rand else None
+                )
+            self.np_random.bit_generator.state = world_rng_state
+
         # Check if domain randomization is enabled or not
         rand = self.np_random if self.domain_rand else None
 
@@ -584,7 +620,10 @@ class MiniWorldEnv(gym.Env):
         self.max_forward_step = self.params.get_max("forward_step")
 
         # Randomize parameters of the entities
+        extra_agents = set(self.agents[1:])
         for ent in self.entities:
+            if ent in extra_agents:
+                continue
             ent.randomize(self.params, rand)
 
         # Compute the min and max x, z extents of the whole floorplan
@@ -601,74 +640,110 @@ class MiniWorldEnv(gym.Env):
         self._render_static()
 
         # Generate the first camera image
-        obs = self.render_obs()
+        obs = self.render_obs() if self.num_agents == 1 else self.render_agent_views()
 
         # Return first observation
         return obs, {}
 
-    def _get_carry_pos(self, agent_pos, ent):
+    def _get_carry_pos(self, agent_pos, ent, agent=None):
         """
         Compute the position at which to place an object being carried
         """
 
-        dist = self.agent.radius + ent.radius + self.max_forward_step
-        pos = agent_pos + self.agent.dir_vec * 1.05 * dist
+        agent = self.agent if agent is None else agent
+        dist = agent.radius + ent.radius + self.max_forward_step
+        pos = agent_pos + agent.dir_vec * 1.05 * dist
 
         # Adjust the Y-position so the object is visible while being carried
-        y_pos = max(self.agent.cam_height - ent.height - 0.3, 0)
+        y_pos = max(agent.cam_height - ent.height - 0.3, 0)
         pos = pos + Y_VEC * y_pos
 
         return pos
 
-    def move_agent(self, fwd_dist, fwd_drift):
+    def move_agent(self, fwd_dist, fwd_drift, agent=None):
         """
         Move the agent forward
         """
 
-        next_pos = (
-            self.agent.pos
-            + self.agent.dir_vec * fwd_dist
-            + self.agent.right_vec * fwd_drift
-        )
+        agent = self.agent if agent is None else agent
+        next_pos = agent.pos + agent.dir_vec * fwd_dist + agent.right_vec * fwd_drift
 
-        if self.intersect(self.agent, next_pos, self.agent.radius):
+        if self.intersect(agent, next_pos, agent.radius):
             return False
 
-        carrying = self.agent.carrying
+        carrying = agent.carrying
         if carrying:
-            next_carrying_pos = self._get_carry_pos(next_pos, carrying)
+            next_carrying_pos = self._get_carry_pos(next_pos, carrying, agent=agent)
 
             if self.intersect(carrying, next_carrying_pos, carrying.radius):
                 return False
 
             carrying.pos = next_carrying_pos
 
-        self.agent.pos = next_pos
+        agent.pos = next_pos
 
         return True
 
-    def turn_agent(self, turn_angle):
+    def turn_agent(self, turn_angle, agent=None):
         """
         Turn the agent left or right
         """
 
+        agent = self.agent if agent is None else agent
         turn_angle *= math.pi / 180
-        orig_dir = self.agent.dir
+        orig_dir = agent.dir
 
-        self.agent.dir += turn_angle
+        agent.dir += turn_angle
 
-        carrying = self.agent.carrying
+        carrying = agent.carrying
         if carrying:
-            pos = self._get_carry_pos(self.agent.pos, carrying)
+            pos = self._get_carry_pos(agent.pos, carrying, agent=agent)
 
             if self.intersect(carrying, pos, carrying.radius):
-                self.agent.dir = orig_dir
+                agent.dir = orig_dir
                 return False
 
             carrying.pos = pos
-            carrying.dir = self.agent.dir
+            carrying.dir = agent.dir
 
         return True
+
+    def _apply_agent_action(self, agent, action, fwd_step, fwd_drift, turn_step):
+        """Apply one action to one agent without advancing world time."""
+
+        action = int(action)
+        if action == self.actions.move_forward:
+            self.move_agent(fwd_step, fwd_drift, agent=agent)
+
+        elif action == self.actions.move_back:
+            self.move_agent(-fwd_step, fwd_drift, agent=agent)
+
+        elif action == self.actions.turn_left:
+            self.turn_agent(turn_step, agent=agent)
+
+        elif action == self.actions.turn_right:
+            self.turn_agent(-turn_step, agent=agent)
+
+        elif action == self.actions.do_nothing:
+            pass
+
+        elif action == self.actions.pickup:
+            test_pos = agent.pos + agent.dir_vec * 1.5 * agent.radius
+            ent = self.intersect(agent, test_pos, 1.2 * agent.radius)
+            if not agent.carrying and isinstance(ent, Entity) and not ent.is_static:
+                # Agents are physical entities but cannot be picked up.
+                if ent not in self.agents:
+                    agent.carrying = ent
+
+        elif action == self.actions.drop:
+            if agent.carrying:
+                agent.carrying.pos[1] = 0
+                agent.carrying = None
+
+        if agent.carrying:
+            ent_pos = self._get_carry_pos(agent.pos, agent.carrying, agent=agent)
+            agent.carrying.pos = ent_pos
+            agent.carrying.dir = agent.dir
 
     def step(self, action):
         """
@@ -682,45 +757,32 @@ class MiniWorldEnv(gym.Env):
         fwd_drift = self.params.sample(rand, "forward_drift")
         turn_step = self.params.sample(rand, "turn_step")
 
-        if action == self.actions.move_forward:
-            self.move_agent(fwd_step, fwd_drift)
+        if self.num_agents == 1:
+            actions = [action]
+        else:
+            actions = np.asarray(action).reshape(-1)
+            # Some legacy task classes replace action_space with Discrete after
+            # base initialization. Treat a scalar as an action for the primary
+            # agent and keep the others still, while MultiDiscrete callers can
+            # control every agent independently.
+            if len(actions) == 1:
+                primary_action = actions[0]
+                actions = np.full(
+                    self.num_agents, self.actions.do_nothing, dtype=np.int64
+                )
+                actions[0] = primary_action
+            elif len(actions) != self.num_agents:
+                raise ValueError(
+                    f"expected {self.num_agents} actions, received {len(actions)}"
+                )
 
-        elif action == self.actions.move_back:
-            self.move_agent(-fwd_step, fwd_drift)
-
-        elif action == self.actions.turn_left:
-            self.turn_agent(turn_step)
-
-        elif action == self.actions.turn_right:
-            self.turn_agent(-turn_step)
-            
-        elif action == self.actions.do_nothing:
-            pass
-
-        # Pick up an object
-        elif action == self.actions.pickup:
-            # Position at which we will test for an intersection
-            test_pos = self.agent.pos + self.agent.dir_vec * 1.5 * self.agent.radius
-            ent = self.intersect(self.agent, test_pos, 1.2 * self.agent.radius)
-            if not self.agent.carrying:
-                if isinstance(ent, Entity):
-                    if not ent.is_static:
-                        self.agent.carrying = ent
-
-        # Drop an object being carried
-        elif action == self.actions.drop:
-            if self.agent.carrying:
-                self.agent.carrying.pos[1] = 0
-                self.agent.carrying = None
-
-        # If we are carrying an object, update its position as we move
-        if self.agent.carrying:
-            ent_pos = self._get_carry_pos(self.agent.pos, self.agent.carrying)
-            self.agent.carrying.pos = ent_pos
-            self.agent.carrying.dir = self.agent.dir
+        for agent, agent_action in zip(self.agents, actions):
+            self._apply_agent_action(
+                agent, agent_action, fwd_step, fwd_drift, turn_step
+            )
 
         # Generate the current camera image
-        obs = self.render_obs()
+        obs = self.render_obs() if self.num_agents == 1 else self.render_agent_views()
 
         # If the maximum time step count is reached
         if self.step_count >= self.max_episode_steps:
@@ -923,6 +985,7 @@ class MiniWorldEnv(gym.Env):
         max_x=None,
         min_z=None,
         max_z=None,
+        agent=None,
     ):
         """
         Place the agent in the environment at a random position
@@ -930,7 +993,7 @@ class MiniWorldEnv(gym.Env):
         """
 
         return self.place_entity(
-            self.agent,
+            self.agent if agent is None else agent,
             room=room,
             pos=pos,
             dir=dir,
@@ -1067,7 +1130,7 @@ class MiniWorldEnv(gym.Env):
 
         glEndList()
 
-    def _render_world(self, frame_buffer, render_agent):
+    def _render_world(self, frame_buffer, render_agent, observer_agent=None):
         """
         Render the world from a given camera position into a frame buffer,
         and produce a numpy image array as output.
@@ -1079,12 +1142,14 @@ class MiniWorldEnv(gym.Env):
         # TODO: keep the non-static entities in a different list for efficiency?
         # Render the non-static entities
         for ent in self.entities:
-            if not ent.is_static and ent is not self.agent:
+            if not ent.is_static and ent not in self.agents:
                 ent.render()
                 # ent.draw_bound()
 
         if render_agent:
-            self.agent.render()
+            for agent in self.agents:
+                if agent is not observer_agent:
+                    agent.render()
 
         # Resolve the rendered image into a numpy array
         img = frame_buffer.resolve()
@@ -1180,13 +1245,14 @@ class MiniWorldEnv(gym.Env):
         else:
             return self._render_world(frame_buffer, render_agent=render_agent)
 
-    def render_obs(self, frame_buffer=None):
+    def render_obs(self, frame_buffer=None, agent=None):
         """
         Render an observation from the point of view of the agent
         """
 
         if frame_buffer is None:
             frame_buffer = self.obs_fb
+        agent = self.agent if agent is None else agent
 
         # Switch to the default OpenGL context
         # This is necessary on Linux Nvidia drivers
@@ -1204,7 +1270,7 @@ class MiniWorldEnv(gym.Env):
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluPerspective(
-            self.agent.cam_fov_y,
+            agent.cam_fov_y,
             frame_buffer.width / float(frame_buffer.height),
             0.04,
             100.0,
@@ -1215,18 +1281,98 @@ class MiniWorldEnv(gym.Env):
         glLoadIdentity()
         gluLookAt(
             # Eye position
-            *self.agent.cam_pos,
+            *agent.cam_pos,
             # Target
-            *(self.agent.cam_pos + self.agent.cam_dir),
+            *(agent.cam_pos + agent.cam_dir),
             # Up vector
             0,
             1.0,
             0.0,
         )
 
-        return self._render_world(frame_buffer, render_agent=False)
+        return self._render_world(
+            frame_buffer, render_agent=True, observer_agent=agent
+        )
 
-    def render_depth(self, frame_buffer=None):
+    def render_agent_views(self, frame_buffer=None):
+        """Render synchronized first-person RGB observations for every agent."""
+
+        if frame_buffer is None:
+            frame_buffer = self.obs_fb
+        return np.stack(
+            [self.render_obs(frame_buffer=frame_buffer, agent=agent) for agent in self.agents],
+            axis=0,
+        )
+
+    @staticmethod
+    def tile_agent_views(views):
+        """Arrange one to four camera frames in a compact display grid."""
+
+        views = np.asarray(views)
+        if views.ndim != 4 or views.shape[-1] != 3:
+            raise ValueError("views must have shape (N, H, W, 3)")
+        if not 1 <= len(views) <= 4:
+            raise ValueError("one to four views are supported")
+        if len(views) == 1:
+            return views[0]
+        if len(views) == 2:
+            return np.concatenate([views[0], views[1]], axis=1)
+
+        blank = np.zeros_like(views[0])
+        cells = list(views) + [blank] * (4 - len(views))
+        top = np.concatenate(cells[:2], axis=1)
+        bottom = np.concatenate(cells[2:4], axis=1)
+        return np.concatenate([top, bottom], axis=0)
+
+    def render_camera(
+        self,
+        eye_pos,
+        target_pos,
+        frame_buffer=None,
+        fov_y=None,
+        render_agent=True,
+    ):
+        """Render the world from an arbitrary fixed camera pose."""
+
+        if frame_buffer is None:
+            frame_buffer = self.obs_fb
+
+        eye_pos = np.asarray(eye_pos, dtype=float)
+        target_pos = np.asarray(target_pos, dtype=float)
+        if eye_pos.shape != (3,) or target_pos.shape != (3,):
+            raise ValueError("eye_pos and target_pos must be 3D coordinates")
+        if np.allclose(eye_pos, target_pos):
+            raise ValueError("camera eye and target positions must differ")
+
+        self.shadow_window.switch_to()
+        frame_buffer.bind()
+
+        glClearColor(*self.sky_color, 1.0)
+        glClearDepth(1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(
+            self.agent.cam_fov_y if fov_y is None else float(fov_y),
+            frame_buffer.width / float(frame_buffer.height),
+            0.04,
+            100.0,
+        )
+
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        gluLookAt(
+            *eye_pos,
+            *target_pos,
+            0.0,
+            1.0,
+            0.0,
+        )
+
+        return self._render_world(frame_buffer, render_agent=render_agent)
+
+    def render_depth(self, frame_buffer=None, agent=None):
         """
         Produce a depth map
         Values are floating-point, map shape is (H,W,1)
@@ -1237,7 +1383,7 @@ class MiniWorldEnv(gym.Env):
             frame_buffer = self.obs_fb
 
         # Render the world
-        self.render_obs(frame_buffer)
+        self.render_obs(frame_buffer, agent=agent)
 
         return frame_buffer.get_depth_map(0.04, 100.0)
 
@@ -1358,7 +1504,10 @@ class MiniWorldEnv(gym.Env):
 
         # Render the human-view image
         if self.view == "agent":
-            img = self.render_obs(self.vis_fb)
+            if self.num_agents == 1:
+                img = self.render_obs(self.vis_fb)
+            else:
+                img = self.tile_agent_views(self.render_agent_views(self.vis_fb))
         else:
             img = self.render_top_view(self.vis_fb)
         img_width = img.shape[1]
@@ -1368,7 +1517,10 @@ class MiniWorldEnv(gym.Env):
             return img
 
         # Render the agent's view
-        obs = self.render_obs()
+        if self.num_agents == 1:
+            obs = self.render_obs()
+        else:
+            obs = self.tile_agent_views(self.render_agent_views())
         obs_width = obs.shape[1]
         obs_height = obs.shape[0]
 
