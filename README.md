@@ -144,6 +144,27 @@ See the list of [available environments](docs/environments.md) for more informat
 ./manual_control.py --env-name MiniWorld-Hallway-v0 --top_view
 ```
 
+### Multi-agent camera rollouts
+
+`MovingBlockWorld` can run up to four agents in the same simulation. Each agent
+has an independent action, pose, and first-person camera. The video generator
+saves an individual stream for every agent and a synchronized grid view:
+
+```bash
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --num-agents 4 --steps 300 --out-prefix ./out/multi
+```
+
+For multi-agent runs, `--out-prefix` is treated as a directory. The command
+above creates `./out/multi/multi_agent_0_rgb.mp4` through
+`multi_agent_3_rgb.mp4` and `multi_agents_grid.mp4`. Use `--num-agents 3` for a
+three-camera layout.
+
+For interactive control, run `./scripts/manual_control.py --env-name
+MiniWorld-MovingBlockWorld-v0 --num-agents 4`; use number keys `1`–`4` to
+choose which agent the arrow keys control.
+
 There is also a script to run automated tests (`run_tests.py`) and a script to gather performance metrics (`benchmark.py`).
 
 ### Offscreen Rendering (Clusters and Colab)

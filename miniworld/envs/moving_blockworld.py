@@ -2,7 +2,7 @@ from gymnasium import utils
 import math
 import numpy as np
 
-from miniworld.entity import Box, Ball, COLOR_NAMES
+from miniworld.entity import Agent, Box, Ball, COLOR_NAMES, MeshEnt
 from miniworld.envs.putnext import PutNext
 from miniworld.math import intersect_circle_segs
 from miniworld.miniworld import MiniWorldEnv
@@ -60,6 +60,9 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         block_size_xy=None,
         block_height=None,
         agent_center_start=False,
+        num_static_objects=0,
+        static_object_meshes=None,
+        static_object_spacing=3.0,
         **kwargs,
     ):
         self.box_speed_scale = float(box_speed_scale)
@@ -82,6 +85,15 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         self.block_size_xy = None if block_size_xy is None else float(block_size_xy)
         self.block_height = None if block_height is None else float(block_height)
         self.agent_center_start = bool(agent_center_start)
+        self.num_static_objects = max(0, int(num_static_objects))
+        self.static_object_meshes = (
+            list(static_object_meshes)
+            if static_object_meshes is not None
+            else ["office_desk", "office_chair", "barrel", "cone", "tree_pine"]
+        )
+        if self.num_static_objects > 0 and not self.static_object_meshes:
+            raise ValueError("static_object_meshes cannot be empty when static objects are requested")
+        self.static_object_spacing = max(0.5, float(static_object_spacing))
         # Store texture overrides
         self._floor_tex_override = str(floor_tex) if floor_tex is not None else None
         self._wall_tex_override = str(wall_tex) if wall_tex is not None else None
@@ -107,35 +119,104 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         )
         utils.EzPickle.__init__(
             self,
-            size,
-            floor_tex,
-            wall_tex,
-            ceil_tex,
-            blocks_static,
-            spawn_wall_buffer,
-            box_speed_scale,
-            box_allow_overlap,
-            agent_box_allow_overlap,
-            box_random_orientation,
-            self.grid_mode,
-            self.grid_vel_min,
-            self.grid_vel_max,
-            self.grid_cardinal_only,
-            self.num_blocks,
-            self.allow_color_repeat,
-            self.color_pool,
-            self.near_margin,
-            self.block_size_xy,
-            self.block_height,
-            self.agent_center_start,
-            block_torus_wrap=block_torus_wrap,
+            size=size,
+            floor_tex=floor_tex,
+            wall_tex=wall_tex,
+            ceil_tex=ceil_tex,
             box_tex=box_tex,
             box_tex_randomize=box_tex_randomize,
             wall_tex_randomize=wall_tex_randomize,
             floor_tex_randomize=floor_tex_randomize,
             box_and_ball=box_and_ball,
+            box_speed_scale=self.box_speed_scale,
+            box_allow_overlap=self.box_allow_overlap,
+            agent_box_allow_overlap=self.agent_box_allow_overlap,
+            box_random_orientation=self.box_random_orientation,
+            blocks_static=self.blocks_static,
+            block_torus_wrap=self.block_torus_wrap,
+            spawn_wall_buffer=self.spawn_wall_buffer,
+            grid_mode=self.grid_mode,
+            grid_vel_min=self.grid_vel_min,
+            grid_vel_max=self.grid_vel_max,
+            grid_cardinal_only=self.grid_cardinal_only,
+            num_blocks=self.num_blocks,
+            allow_color_repeat=self.allow_color_repeat,
+            color_pool=self.color_pool,
+            ensure_base_palette=self.ensure_base_palette,
+            near_margin=self.near_margin,
+            block_size_xy=self.block_size_xy,
+            block_height=self.block_height,
+            agent_center_start=self.agent_center_start,
+            num_static_objects=self.num_static_objects,
+            static_object_meshes=self.static_object_meshes,
+            static_object_spacing=self.static_object_spacing,
             **kwargs,
         )
+
+    def _place_static_scenery(self):
+        """Place one center landmark plus well-spaced static mesh objects."""
+
+        self.static_scenery = []
+        if self.num_static_objects == 0:
+            return
+
+        if len(self.wall_segs) == 0:
+            self._gen_static_data()
+
+        center = np.array([self.size * 0.5, 0.0, self.size * 0.5], dtype=float)
+        margin = max(1.0, self.static_object_spacing * 0.5)
+        axis = np.arange(
+            margin,
+            self.size - margin + 1e-6,
+            self.static_object_spacing,
+            dtype=float,
+        )
+        candidates = [center]
+        other_candidates = []
+        for x in axis:
+            for z in axis:
+                pos = np.array([x, 0.0, z], dtype=float)
+                # Keep the center landmark visually isolated as well.
+                if np.linalg.norm(pos[[0, 2]] - center[[0, 2]]) < 0.8 * self.static_object_spacing:
+                    continue
+                other_candidates.append(pos)
+        self.np_random.shuffle(other_candidates)
+        candidates.extend(other_candidates)
+
+        height_by_mesh = {
+            "office_desk": 1.0,
+            "office_chair": 1.1,
+            "barrel": 1.2,
+            "cone": 0.9,
+            "tree": 2.2,
+            "tree_pine": 2.2,
+        }
+
+        for candidate in candidates:
+            if len(self.static_scenery) >= self.num_static_objects:
+                break
+
+            if len(self.static_scenery) == 0:
+                mesh_name = self.static_object_meshes[0]
+            else:
+                mesh_name = str(self.np_random.choice(self.static_object_meshes))
+            height = height_by_mesh.get(mesh_name, 1.2)
+            ent = MeshEnt(mesh_name=mesh_name, height=height, static=True)
+
+            # A little extra clearance keeps the scene sparse and navigable.
+            if self.intersect(ent, candidate, ent.radius + 0.15):
+                continue
+
+            direction = float(self.np_random.uniform(-math.pi, math.pi))
+            self.place_entity(ent, pos=candidate.copy(), dir=direction)
+            self.static_scenery.append(ent)
+
+        if len(self.static_scenery) < self.num_static_objects:
+            raise RuntimeError(
+                f"could only place {len(self.static_scenery)} of "
+                f"{self.num_static_objects} requested static objects; "
+                "reduce --num-static-objects or --static-object-spacing"
+            )
 
     def _gen_world(self):
         # Create a rectangular room
@@ -156,6 +237,9 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         # wall_tex="concrete",
         # ceil_tex="concrete_tiles",
         self.add_rect_room(min_x=0, max_x=self.size, min_z=0, max_z=self.size, **room_kwargs)
+
+        # Static scenery is placed first so agents and moving blocks spawn around it.
+        self._place_static_scenery()
 
         # Choose colors for the blocks
         if self.ensure_base_palette and self.num_blocks > 0:
@@ -274,11 +358,12 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                             continue
                 break
 
-    def _quantize_heading(self):
+    def _quantize_heading(self, agent=None):
+        agent = self.agent if agent is None else agent
         q = (math.pi / 2)
-        self.agent.dir = round(self.agent.dir / q) * q
-        if self.agent.carrying is not None:
-            self.agent.carrying.dir = self.agent.dir
+        agent.dir = round(agent.dir / q) * q
+        if agent.carrying is not None:
+            agent.carrying.dir = agent.dir
 
     def _snap_entity_to_grid(self, ent):
         snapped = ent.pos.copy()
@@ -305,7 +390,8 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                     ent.dir = 0.0
 
         if self.grid_mode:
-            self._snap_entity_to_grid(self.agent)
+            for agent in self.agents:
+                self._snap_entity_to_grid(agent)
             for ent in self.entities:
                 if isinstance(ent, (Box, Ball)):
                     self._snap_entity_to_grid(ent)
@@ -365,8 +451,8 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             if self.box_allow_overlap and isinstance(ent, (Box, Ball)) and isinstance(ent2, (Box, Ball)):
                 continue
             if self.agent_box_allow_overlap and (
-                (ent is self.agent and isinstance(ent2, (Box, Ball)))
-                or (ent2 is self.agent and isinstance(ent, (Box, Ball)))
+                (isinstance(ent, Agent) and isinstance(ent2, (Box, Ball)))
+                or (isinstance(ent2, Agent) and isinstance(ent, (Box, Ball)))
             ):
                 continue
 
@@ -389,8 +475,8 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             if self.box_allow_overlap and isinstance(ent, (Box, Ball)) and isinstance(ent2, (Box, Ball)):
                 continue
             if self.agent_box_allow_overlap and (
-                (ent is self.agent and isinstance(ent2, (Box, Ball)))
-                or (ent2 is self.agent and isinstance(ent, (Box, Ball)))
+                (isinstance(ent, Agent) and isinstance(ent2, (Box, Ball)))
+                or (isinstance(ent2, Agent) and isinstance(ent, (Box, Ball)))
             ):
                 continue
 
@@ -442,17 +528,20 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             return obs, reward, termination, truncation, info
 
         if self.grid_mode:
-            self._snap_entity_to_grid(self.agent)
-            self._quantize_heading()
-            if self.agent.carrying is not None:
-                self._snap_entity_to_grid(self.agent.carrying)
+            for agent in self.agents:
+                self._snap_entity_to_grid(agent)
+                self._quantize_heading(agent)
+                if agent.carrying is not None:
+                    self._snap_entity_to_grid(agent.carrying)
 
-        carrying = self.agent.carrying
+        carried_entities = {
+            agent.carrying for agent in self.agents if agent.carrying is not None
+        }
 
         for ent in list(self.entities):
             if not isinstance(ent, (Box, Ball)):
                 continue
-            if carrying is not None and ent is carrying:
+            if ent in carried_entities:
                 continue
             if self.blocks_static:
                 # No motion updates for static mode
@@ -557,5 +646,3 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
 
         # No reward-based termination condition here
         return obs, reward, termination, truncation, info
-
-

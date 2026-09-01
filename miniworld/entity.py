@@ -529,8 +529,11 @@ class Ball(MeshEnt):
 
 
 class Agent(Entity):
-    def __init__(self):
+    def __init__(self, color=(1.0, 0.0, 0.0)):
         super().__init__()
+
+        # Color used to distinguish agents in third-person/top-down views
+        self.color = tuple(float(c) for c in color)
 
         # Distance between the camera and the floor
         self.cam_height = 1.5
@@ -607,7 +610,7 @@ class Agent(Entity):
         p1 = p + 0.75 * (rv - dv)
         p2 = p + 0.75 * (-rv - dv)
 
-        glColor3f(1, 0, 0)
+        glColor3f(*self.color)
         glBegin(GL_TRIANGLES)
         glVertex3f(*p0)
         glVertex3f(*p2)

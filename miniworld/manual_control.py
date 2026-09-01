@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pyglet
 from pyglet.window import key
 
@@ -8,6 +9,7 @@ class ManualControl:
     def __init__(self, env, no_time_limit: bool, domain_rand: bool, heading_zero: bool = False):
         self.env = env.unwrapped
         self.heading_zero = heading_zero
+        self.active_agent_idx = 0
 
         if no_time_limit:
             self.env.max_episode_steps = math.inf
@@ -18,15 +20,15 @@ class ManualControl:
         print("============")
         print("Instructions")
         print("============")
-        print("move: arrow keys\npickup: P\ndrop: D\ndone: ENTER\nquit: ESC")
+        print(
+            "select agent: 1-4\nmove: arrow keys\npickup: P\n"
+            "drop: D\ndone: ENTER\nquit: ESC"
+        )
         print("============")
 
         self.env.reset()
         if self.heading_zero:
-            # Align heading to 0 radians and sync any carried entity orientation
-            self.env.agent.dir = 0.0
-            if self.env.agent.carrying:
-                self.env.agent.carrying.dir = self.env.agent.dir
+            self._align_headings()
 
         # Create the display window
         self.env.render()
@@ -44,14 +46,20 @@ class ManualControl:
                 print("RESET")
                 self.env.reset()
                 if self.heading_zero:
-                    self.env.agent.dir = 0.0
-                    if self.env.agent.carrying:
-                        self.env.agent.carrying.dir = self.env.agent.dir
+                    self._align_headings()
                 self.env.render()
                 return
 
             if symbol == key.ESCAPE:
                 self.env.close()
+
+            number_keys = (key._1, key._2, key._3, key._4)
+            if symbol in number_keys:
+                idx = number_keys.index(symbol)
+                if idx < len(self.env.agents):
+                    self.active_agent_idx = idx
+                    print(f"selected agent {idx + 1}")
+                return
 
             if symbol == key.UP:
                 self.step(self.env.unwrapped.actions.move_forward)
@@ -86,11 +94,22 @@ class ManualControl:
         self.env.close()
 
     def step(self, action):
+        agent_label = self.active_agent_idx + 1
         print(
-            f"step {self.env.unwrapped.step_count + 1}/{self.env.unwrapped.max_episode_steps}: {self.env.unwrapped.actions(action).name}"
+            f"step {self.env.unwrapped.step_count + 1}/{self.env.unwrapped.max_episode_steps}: "
+            f"agent {agent_label} {self.env.unwrapped.actions(action).name}"
         )
 
-        obs, reward, termination, truncation, info = self.env.step(action)
+        if self.env.num_agents == 1:
+            joint_action = action
+        else:
+            joint_action = np.full(
+                self.env.num_agents,
+                self.env.actions.do_nothing,
+                dtype=np.int64,
+            )
+            joint_action[self.active_agent_idx] = action
+        obs, reward, termination, truncation, info = self.env.step(joint_action)
 
         if reward > 0:
             print(f"reward={reward:.2f}")
@@ -99,8 +118,12 @@ class ManualControl:
             print("done!")
             self.env.reset()
             if self.heading_zero:
-                self.env.agent.dir = 0.0
-                if self.env.agent.carrying:
-                    self.env.agent.carrying.dir = self.env.agent.dir
+                self._align_headings()
 
         self.env.render()
+
+    def _align_headings(self):
+        for agent in self.env.agents:
+            agent.dir = 0.0
+            if agent.carrying:
+                agent.carrying.dir = agent.dir
