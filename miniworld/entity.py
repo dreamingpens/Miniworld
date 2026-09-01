@@ -615,27 +615,7 @@ class Agent(Entity):
             glRotatef(self.dir * 180 / math.pi, 0, 1, 0)
             glScalef(self.mesh_scale, self.mesh_scale, self.mesh_scale)
             glColor3f(1, 1, 1)
-            self.mesh.render()
-
-            # A thin per-agent color band keeps identities readable from all
-            # horizontal camera angles without requiring one OBJ per color.
-            band_radius = 0.323
-            band_bottom = 0.70
-            band_top = 0.88
-            glColor3f(*self.color)
-            glBegin(GL_QUADS)
-            for idx in range(8):
-                a0 = -idx * 2 * math.pi / 8
-                a1 = -(idx + 1) * 2 * math.pi / 8
-                x0, z0 = band_radius * math.cos(a0), band_radius * math.sin(a0)
-                x1, z1 = band_radius * math.cos(a1), band_radius * math.sin(a1)
-                mid = 0.5 * (a0 + a1)
-                glNormal3f(math.cos(mid), 0, math.sin(mid))
-                glVertex3f(x0, band_bottom, z0)
-                glVertex3f(x1, band_bottom, z1)
-                glVertex3f(x1, band_top, z1)
-                glVertex3f(x0, band_top, z0)
-            glEnd()
+            self.mesh.render(color_overrides={"body": self.color})
             glPopMatrix()
 
         marker_height = self.height + (0.025 if self.mesh is not None else 0.0)

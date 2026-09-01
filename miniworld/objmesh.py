@@ -125,7 +125,12 @@ class ObjMesh:
                 if len(chunks) > 0:
                     chunks[-1]["end_idx"] = idx
                 chunks.append(
-                    {"mtl": materials[mtl_name], "start_idx": idx, "end_idx": None}
+                    {
+                        "mtl": materials[mtl_name],
+                        "mtl_name": mtl_name,
+                        "start_idx": idx,
+                        "end_idx": None,
+                    }
                 )
                 cur_mtl = mtl_name
         chunks[-1]["end_idx"] = len(faces)
@@ -190,6 +195,7 @@ class ObjMesh:
 
         # Textures, one per chunk
         self.textures = []
+        self.material_names = []
 
         # For each chunk
         for chunk in chunks:
@@ -214,6 +220,7 @@ class ObjMesh:
 
             self.vlists.append(vlist)
             self.textures.append(texture)
+            self.material_names.append(chunk["mtl_name"])
 
     def _load_mtl(self, model_file):
         model_dir, file_name = os.path.split(model_file)
@@ -277,9 +284,17 @@ class ObjMesh:
 
         return materials
 
-    def render(self):
+    def render(self, color_overrides=None):
         for idx, vlist in enumerate(self.vlists):
             texture = self.textures[idx]
+
+            if color_overrides is not None:
+                color = color_overrides.get(self.material_names[idx])
+                if color is not None:
+                    color = tuple(float(component) for component in color)
+                    if len(color) != 3:
+                        raise ValueError("material color overrides must be RGB triples")
+                    vlist.colors[:] = color * vlist.get_size()
 
             if texture:
                 glEnable(GL_TEXTURE_2D)
