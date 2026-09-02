@@ -64,7 +64,7 @@ Notes:
   Dataset/multi-generation flags (--dataset-root, --num-videos, etc.) are DEPRECATED in this
   script; use scripts.generate_videos_batch for large-scale generation.
 
-Command to generate one sample from the textured training set used in the FloWM paper: 
+Command to generate one sample from the textured training set used in the FloWM paper:
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlockWorld-v0 \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
@@ -79,7 +79,7 @@ python -m scripts.generate_videos \
   --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball \
   --num-static-objects 12 --static-object-spacing 3.0 \
   --four-corner-cameras --corner-camera-height 8
-  
+
 """
 
 
@@ -407,7 +407,7 @@ class CenterRotatePolicy:
         if r == 1:
             return a.turn_right
         return a.do_nothing  # id 4 used as NOOP in datasets
-    
+
 
 class DoNothingPolicy:
     """
@@ -1616,16 +1616,19 @@ def run_rollout(
     seed: Optional[int] = None,
     observe_steps: int = 5,
     capture_top: bool = False,
+    capture_top_sequence: bool = True,
+    capture_rgb: bool = True,
+    capture_depth: bool = True,
     store_block_info: bool = False,
     capture_corner_cameras: bool = False,
     corner_camera_height: float = 8.0,
     corner_camera_inset: float = 1.0,
     corner_camera_fov_y: float = 60.0,
 ) -> Tuple[
-    np.ndarray,  # rgb
-    np.ndarray,  # depth
+    Optional[np.ndarray],  # rgb
+    Optional[np.ndarray],  # depth
     np.ndarray,  # actions
-    np.ndarray,  # top or None
+    Optional[np.ndarray],  # top or None
     np.ndarray,  # agent_pos (T+1,3)
     np.ndarray,  # delta_xz (T,2)
     np.ndarray,  # delta_dir (T,)
@@ -1709,12 +1712,12 @@ def run_rollout(
     # Policy may have adjusted spawn pose; ensure heading in [0, 2π) before first capture
     for agent in world.agents:
         agent.dir = _wrap_angle_0_2pi(agent.dir)
-    rgb = env.render()  # render current obs after any policy-driven pose adjust
-
-    # Collect first frame
-    obs_list.append(rgb)
-    depth = env.unwrapped.render_depth(env.unwrapped.vis_fb)
-    depth_list.append(depth)
+    # Collect the primary render/depth only when requested. Camera-only dataset
+    # generation avoids retaining these large, unused frame buffers.
+    if capture_rgb:
+        obs_list.append(env.render())
+    if capture_depth:
+        depth_list.append(env.unwrapped.render_depth(env.unwrapped.vis_fb))
     # Initial agent state
     agent_pos_list.append(env.unwrapped.agent.pos.copy())
     agent_dir_list.append(_wrap_angle_0_2pi(env.unwrapped.agent.dir))
@@ -1777,11 +1780,11 @@ def run_rollout(
         # MiniWorld accumulates heading; normalize to [0, 2π) for consistency
         for agent in world.agents:
             agent.dir = _wrap_angle_0_2pi(agent.dir)
-        rgb = env.render()
-        obs_list.append(rgb)
-        depth = env.unwrapped.render_depth(env.unwrapped.vis_fb)
-        depth_list.append(depth)
-        if capture_top:
+        if capture_rgb:
+            obs_list.append(env.render())
+        if capture_depth:
+            depth_list.append(env.unwrapped.render_depth(env.unwrapped.vis_fb))
+        if capture_top and capture_top_sequence:
             top = env.unwrapped.render_top_view(env.unwrapped.vis_fb, render_agent=True)
             top_list.append(top)
         if capture_corner_cameras:
@@ -1816,8 +1819,14 @@ def run_rollout(
 
     # Keep exactly one frame per executed transition (drop the extra terminal frame)
     steps_executed = len(actions)
-    rgb_arr = np.stack(obs_list[:steps_executed], axis=0)  # (T,H,W,3)
-    depth_arr = np.stack(depth_list[:steps_executed], axis=0)  # (T,H,W,1)
+    rgb_arr = (
+        np.stack(obs_list[:steps_executed], axis=0) if (capture_rgb and obs_list) else None
+    )
+    depth_arr = (
+        np.stack(depth_list[:steps_executed], axis=0)
+        if (capture_depth and depth_list)
+        else None
+    )
     actions_arr = np.array(actions, dtype=np.int64)  # (T,)
     top_arr = (
         np.stack(top_list[:steps_executed], axis=0) if (capture_top and top_list) else None
@@ -1921,8 +1930,19 @@ def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
             writer.append_data(frame)
 
 
-def write_corner_camera_videos(out_prefix: str, frames: np.ndarray):
-    """Save four camera streams and a 2x2 synchronized montage."""
+def write_rgb_frame(out_path: str, frame: np.ndarray):
+    """Write one RGB frame without wrapping it in a video container."""
+    import imageio.v2 as imageio
+
+    out_dir = os.path.dirname(out_path) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    imageio.imwrite(out_path, frame)
+
+
+def write_corner_camera_videos(
+    out_prefix: str, frames: np.ndarray, include_montage: bool = True
+):
+    """Save four camera streams and, optionally, a 2x2 synchronized montage."""
 
     for camera_idx, camera_name in enumerate(CORNER_CAMERA_NAMES):
         write_mp4_rgb(
@@ -1930,21 +1950,25 @@ def write_corner_camera_videos(out_prefix: str, frames: np.ndarray):
             frames[:, camera_idx],
         )
 
-    top_row = np.concatenate([frames[:, 0], frames[:, 1]], axis=2)
-    bottom_row = np.concatenate([frames[:, 2], frames[:, 3]], axis=2)
-    montage = np.concatenate([top_row, bottom_row], axis=1)
-    write_mp4_rgb(f"{out_prefix}_corners_2x2.mp4", montage)
+    if include_montage:
+        top_row = np.concatenate([frames[:, 0], frames[:, 1]], axis=2)
+        bottom_row = np.concatenate([frames[:, 2], frames[:, 3]], axis=2)
+        montage = np.concatenate([top_row, bottom_row], axis=1)
+        write_mp4_rgb(f"{out_prefix}_corners_2x2.mp4", montage)
 
 
-def write_agent_camera_videos(out_prefix: str, frames: np.ndarray):
-    """Save each first-person stream and their synchronized grid."""
+def write_agent_camera_videos(
+    out_prefix: str, frames: np.ndarray, include_montage: bool = True
+):
+    """Save each first-person stream and, optionally, their synchronized grid."""
 
     for agent_idx in range(frames.shape[1]):
         write_mp4_rgb(f"{out_prefix}_agent_{agent_idx}_rgb.mp4", frames[:, agent_idx])
-    montage = np.stack(
-        [MiniWorldEnv.tile_agent_views(step_views) for step_views in frames], axis=0
-    )
-    write_mp4_rgb(f"{out_prefix}_agents_grid.mp4", montage)
+    if include_montage:
+        montage = np.stack(
+            [MiniWorldEnv.tile_agent_views(step_views) for step_views in frames], axis=0
+        )
+        write_mp4_rgb(f"{out_prefix}_agents_grid.mp4", montage)
 
 
 def _generate_one(idx: int, ns: SimpleNamespace):
@@ -2000,7 +2024,10 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         policy_kwargs=policy_kwargs,
         seed=item_seed,
         observe_steps=args.observe_steps,
-        capture_top=(args.debug_join or args.output_2d_map),
+        capture_top=(args.debug_join or args.output_2d_map or args.output_2d_map_frame),
+        capture_top_sequence=(args.debug_join or args.output_2d_map),
+        capture_rgb=(not args.camera_streams_only or args.debug_join),
+        capture_depth=not args.camera_streams_only,
         store_block_info=getattr(args, "store_block_info", False),
         capture_corner_cameras=getattr(args, "four_corner_cameras", False),
         corner_camera_height=args.corner_camera_height,
@@ -2008,9 +2035,13 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         corner_camera_fov_y=args.corner_camera_fov_y,
     )
 
-    write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
-    # Save raw depth (float32) without quantization
-    torch.save(torch.from_numpy(depth).to(torch.float32), f"{out_prefix}_depth.pt")
+    if not args.camera_streams_only:
+        assert rgb is not None and depth is not None
+        write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
+        # Save raw depth (float32) without quantization
+        torch.save(torch.from_numpy(depth).to(torch.float32), f"{out_prefix}_depth.pt")
+
+    # Relation labeling consumes this file even in compact camera-only datasets.
     meta = {
         "actions": torch.tensor(actions, dtype=torch.long),
         "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
@@ -2027,10 +2058,11 @@ def _generate_one(idx: int, ns: SimpleNamespace):
                 "multi_agent_delta_dir": torch.from_numpy(multi_agent_info["delta_dir"]),
             }
         )
-    if args.output_2d_map and top_view_scale is not None:
+    if (args.output_2d_map or args.output_2d_map_frame) and top_view_scale is not None:
         meta["top_view_scale"] = {k: float(v) for k, v in top_view_scale.items()}
     torch.save(meta, f"{out_prefix}_actions.pt")
     if args.debug_join and top is not None:
+        assert rgb is not None
         H, W = rgb.shape[1], rgb.shape[2]
         if top.shape[1] != H or top.shape[2] != W:
             import cv2
@@ -2042,13 +2074,19 @@ def _generate_one(idx: int, ns: SimpleNamespace):
 
     if args.output_2d_map and top is not None:
         write_mp4_rgb(f"{out_prefix}_map_2d.mp4", top)
+    if args.output_2d_map_frame and top is not None:
+        write_rgb_frame(f"{out_prefix}_map_2d.png", top[0])
 
     if getattr(args, "store_block_info", False) and block_info is not None:
         torch.save(block_info, f"{out_prefix}_block_info.pt")
     if corner_cameras is not None:
-        write_corner_camera_videos(out_prefix, corner_cameras)
+        write_corner_camera_videos(
+            out_prefix, corner_cameras, include_montage=not args.camera_streams_only
+        )
     if agent_cameras is not None:
-        write_agent_camera_videos(out_prefix, agent_cameras)
+        write_agent_camera_videos(
+            out_prefix, agent_cameras, include_montage=not args.camera_streams_only
+        )
 
     env.close()
     return idx
@@ -2099,6 +2137,19 @@ def main():
     parser.add_argument("--ensure-base-palette", action="store_true", help="ensure at least one of each base colors: green, red, yellow, blue, purple, gray; remainder random")
     parser.add_argument("--debug-join", dest="debug_join", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
+    parser.add_argument(
+        "--output-2d-map-frame",
+        action="store_true",
+        help="save only the initial top-view map frame as *_map_2d.png",
+    )
+    parser.add_argument(
+        "--camera-streams-only",
+        action="store_true",
+        help=(
+            "save individual agent/CCTV streams, action metadata, and requested map "
+            "outputs; skip primary RGB, depth, and camera montage files"
+        ),
+    )
     parser.add_argument(
         "--store-block-info",
         dest="store_block_info",
@@ -2201,7 +2252,10 @@ def main():
         policy_kwargs=policy_kwargs,
         seed=args.seed,
         observe_steps=args.observe_steps,
-        capture_top=(args.debug_join or args.output_2d_map),
+        capture_top=(args.debug_join or args.output_2d_map or args.output_2d_map_frame),
+        capture_top_sequence=(args.debug_join or args.output_2d_map),
+        capture_rgb=(not args.camera_streams_only or args.debug_join),
+        capture_depth=not args.camera_streams_only,
         store_block_info=getattr(args, "store_block_info", False),
         capture_corner_cameras=args.four_corner_cameras,
         corner_camera_height=args.corner_camera_height,
@@ -2209,10 +2263,14 @@ def main():
         corner_camera_fov_y=args.corner_camera_fov_y,
     )
 
-    # Save outputs
-    write_mp4_rgb(f"{args.out_prefix}_rgb.mp4", rgb)
-    # Save raw depth (float32) without quantization
-    torch.save(torch.from_numpy(depth).to(torch.float32), f"{args.out_prefix}_depth.pt")
+    # Skip the large primary RGB/depth outputs in compact camera-only mode.
+    if not args.camera_streams_only:
+        assert rgb is not None and depth is not None
+        write_mp4_rgb(f"{args.out_prefix}_rgb.mp4", rgb)
+        # Save raw depth (float32) without quantization
+        torch.save(torch.from_numpy(depth).to(torch.float32), f"{args.out_prefix}_depth.pt")
+
+    # Relation labeling consumes this file even in compact camera-only datasets.
     meta = {
         "actions": torch.tensor(actions, dtype=torch.long),
         "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
@@ -2229,7 +2287,7 @@ def main():
                 "multi_agent_delta_dir": torch.from_numpy(multi_agent_info["delta_dir"]),
             }
         )
-    if args.output_2d_map and top_view_scale is not None:
+    if (args.output_2d_map or args.output_2d_map_frame) and top_view_scale is not None:
         # Save mapping to convert world (x,z) -> pixel (u,v)
         meta["top_view_scale"] = {
             k: float(v) for k, v in top_view_scale.items()
@@ -2237,6 +2295,7 @@ def main():
     torch.save(meta, f"{args.out_prefix}_actions.pt")
 
     if args.debug_join and top is not None:
+        assert rgb is not None
         # Concatenate RGB (left) and Top (right)
         # Ensure both are the same H,W
         H, W = rgb.shape[1], rgb.shape[2]
@@ -2254,13 +2313,23 @@ def main():
 
     if args.output_2d_map and top is not None:
         write_mp4_rgb(f"{args.out_prefix}_map_2d.mp4", top)
+    if args.output_2d_map_frame and top is not None:
+        write_rgb_frame(f"{args.out_prefix}_map_2d.png", top[0])
 
     if getattr(args, "store_block_info", False) and block_info is not None:
         torch.save(block_info, f"{args.out_prefix}_block_info.pt")
     if corner_cameras is not None:
-        write_corner_camera_videos(args.out_prefix, corner_cameras)
+        write_corner_camera_videos(
+            args.out_prefix,
+            corner_cameras,
+            include_montage=not args.camera_streams_only,
+        )
     if agent_cameras is not None:
-        write_agent_camera_videos(args.out_prefix, agent_cameras)
+        write_agent_camera_videos(
+            args.out_prefix,
+            agent_cameras,
+            include_montage=not args.camera_streams_only,
+        )
 
     print(f"Saved rollout files under: {Path(args.out_prefix).parent.resolve()}")
 

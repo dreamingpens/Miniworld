@@ -39,6 +39,7 @@ Key flags:
   --block-size INT          Items per block directory (controls subfoldering).
   --file-digits INT         Zero-pad width for per-item filenames (default: 4).
   --num-processes INT       Max concurrent subprocesses (thread pool controls launch).
+  --seed INT                Base seed; rollout index is added for unique item seeds.
   --python PATH             Python executable used for subprocesses (default: current).
 
 Execution model:
@@ -101,6 +102,12 @@ def main():
     parser.add_argument("--block-size", type=int, default=100)
     parser.add_argument("--num-processes", type=int, default=4)
     parser.add_argument("--file-digits", type=int, default=4, help="zero-pad width for filenames inside each block")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="base seed for deterministic generation; each rollout uses base seed + index",
+    )
     parser.add_argument("--python", default=sys.executable, help="python executable to use for subprocesses")
     parser.add_argument(
         "--store-block-info",
@@ -146,6 +153,10 @@ def main():
             "--out-prefix",
             out_prefix,
         ] + fwd
+        if args.seed is not None:
+            # Append after forwarded args so this unique per-item seed wins even
+            # if a legacy command also includes --seed after the separator.
+            cmd.extend(["--seed", str(args.seed + idx)])
 
         cmds.append(cmd)
 
@@ -171,6 +182,7 @@ def main():
             print("- ", msg.splitlines()[0])
         if len(errors) > 10:
             print(f"... and {len(errors) - 10} more")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

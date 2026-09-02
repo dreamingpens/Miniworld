@@ -17,7 +17,7 @@
     --render-height 512 \
     --obs-width 64 \
     --obs-height 64 \
-    --steps 300 \
+    --steps 500 \
     --room-size 16 \
     --block-size-xy 0.7 \
     --block-height 1.5 \
